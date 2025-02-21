@@ -1,0 +1,10 @@
+[package]
+name = "rawriser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rawloader = "0.37"
+druid = "0.8"
+tinyfiledialogs = "3.0"
+rayon = "1.5"
