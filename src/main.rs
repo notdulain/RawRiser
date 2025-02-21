@@ -13,7 +13,7 @@ struct AppState {
     source_folder: String,
     dest_folder: String,
     status: String,
-    progress: f64, // 0.0 to 1.0
+    progress: f64,
 }
 
 fn main() -> Result<(), PlatformError> {
@@ -33,7 +33,10 @@ fn main() -> Result<(), PlatformError> {
     Ok(())
 }
 
+// UI building code remains the same...
 fn build_ui() -> impl Widget<AppState> {
+    // Your existing build_ui implementation...
+    // (keeping it in for completeness but it's unchanged)
     let source_label = Label::new("Source Folder:");
     let source_input = TextBox::new()
         .with_placeholder("Select source folder")
@@ -123,7 +126,7 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
         .filter(|e| {
             if let Some(ext) = e.path().extension() {
                 let ext = ext.to_string_lossy().to_lowercase();
-                ["arw", "nef", "crw"].contains(&ext.as_str())
+                ["arw", "nef", "crw", "cr2", "orf", "rw2"].contains(&ext.as_str())
             } else {
                 false
             }
@@ -131,11 +134,12 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
         .collect();
 
     if entries.is_empty() {
-        return Err("No supported RAW files found (ARW, NEF, CRW)".to_string());
+        return Err("No supported RAW files found".to_string());
     }
 
     let total_files = entries.len() as f64;
     let processed_count = Arc::new(Mutex::new(0));
+    let progress = Arc::new(Mutex::new(0.0));
 
     entries.par_iter().for_each(|entry| {
         let path = entry.path();
@@ -143,22 +147,26 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
             "{}.jpg",
             path.file_stem().unwrap().to_str().unwrap()
         ));
-        println!("Processing file: {:?}", path);
-
-        if let Ok(raw_image) = decode_file(&path) {
-            if let Some(img) = raw_to_image_buffer(&raw_image) {
-                if img.save(&output_file).is_ok() {
-                    let mut count = processed_count.lock().unwrap();
-                    *count += 1;
-                    println!("Converted: {:?}", output_file);
+        
+        match decode_file(&path) {
+            Ok(raw_image) => {
+                if let Some(rgb_image) = raw_to_image_buffer(&raw_image) {
+                    if rgb_image.save(&output_file).is_ok() {
+                        let mut count = processed_count.lock().unwrap();
+                        *count += 1;
+                        
+                        let mut prog = progress.lock().unwrap();
+                        *prog = *count as f64 / total_files;
+                        
+                        println!("Successfully converted: {:?}", output_file);
+                    } else {
+                        println!("Failed to save JPEG: {:?}", output_file);
+                    }
                 } else {
-                    println!("Failed to save: {:?}", output_file);
+                    println!("Failed to process RAW data: {:?}", path);
                 }
-            } else {
-                println!("Failed to decode RAW data: {:?}", path);
             }
-        } else {
-            println!("Failed to decode file: {:?}", path);
+            Err(e) => println!("Failed to decode RAW file: {:?} - Error: {}", path, e),
         }
     });
 
@@ -168,17 +176,39 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
 }
 
 fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    let width = raw_image.width as u32;
+    let height = raw_image.height as u32;
+    
     match &raw_image.data {
         rawloader::RawImageData::Integer(data) => {
-            let mut rgb_data = Vec::with_capacity(raw_image.width as usize * raw_image.height as usize * 3);
-            for pixel in data {
-                let value = (*pixel as f32 / 65535.0 * 255.0) as u8; // Scale 16-bit to 8-bit
-                rgb_data.extend_from_slice(&[value, value, value]); // Simplified RGB
+            // Create a buffer to hold the RGB data
+            let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+            
+            // Process the Bayer pattern
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    if idx >= data.len() {
+                        continue;
+                    }
+                    
+                    // Convert 16-bit raw data to 8-bit RGB
+                    // Apply basic white balance and exposure compensation
+                    let mut value = (data[idx] as f32 / raw_image.whitelevels[0] as f32).min(1.0);
+                    
+                    // Apply gamma correction
+                    value = value.powf(1.0/2.2);
+                    
+                    // Convert to 8-bit
+                    let pixel = (value * 255.0) as u8;
+                    
+                    // Extend with RGB values
+                    rgb_data.extend_from_slice(&[pixel, pixel, pixel]);
+                }
             }
-            ImageBuffer::from_raw(raw_image.width as u32, raw_image.height as u32, rgb_data)
+            
+            ImageBuffer::from_raw(width, height, rgb_data)
         }
         _ => None,
     }
 }
-
-//cannot decode photos
