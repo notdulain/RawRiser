@@ -1,10 +1,10 @@
-use druid::widget::{Button, Flex, Label, TextBox, ProgressBar};
+use druid::widget::{Button, Flex, Label, ProgressBar, TextBox};
 use druid::{AppLauncher, Data, Env, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
-use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
+use image::{ImageBuffer, Rgb, ImageFormat};
+use rawloader::decode_file;
 use rayon::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tinyfiledialogs::select_folder_dialog;
 
@@ -13,7 +13,7 @@ struct AppState {
     source_folder: String,
     dest_folder: String,
     status: String,
-    progress: f64, // 0.0 to 1.0
+    progress: f64, // 0.0 to 1.0 for the progress bar
 }
 
 fn main() -> Result<(), PlatformError> {
@@ -61,11 +61,14 @@ fn build_ui() -> impl Widget<AppState> {
             state.status = "Please select both folders".to_string();
             return;
         }
-        convert_images(&state.source_folder, &state.dest_folder, state);
+        match convert_images(&state.source_folder, &state.dest_folder, state) {
+            Ok(count) => state.status = format!("Converted {} images", count),
+            Err(msg) => state.status = msg,
+        }
     });
 
     let status_label = Label::new(|data: &AppState, _env: &Env| data.status.clone());
-    let progress_bar = ProgressBar::new().lens(AppState::progress);
+    let progress_bar = ProgressBar::new().lens(AppState::progress).fix_width(360.0);
 
     Flex::column()
         .with_child(
@@ -94,69 +97,66 @@ fn build_ui() -> impl Widget<AppState> {
         .padding(20.0)
 }
 
-fn convert_images(source: &str, dest: &str, state: &mut AppState) {
+fn convert_images(source: &str, dest: &str, state: &mut AppState) -> Result<usize, String> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
 
+    // Validate directories
     if !source_path.is_dir() || !dest_path.is_dir() {
-        state.status = "Invalid folder path(s)".to_string();
-        return;
+        return Err("Invalid folder path(s)".to_string());
     }
 
+    // Collect files, filtering for popular RAW formats
     let entries: Vec<_> = fs::read_dir(source_path)
-        .unwrap()
+        .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
-        .filter(|e| e.path().is_file())
+        .filter(|e| {
+            if let Some(ext) = e.path().extension() {
+                let ext = ext.to_string_lossy().to_lowercase();
+                ["arw", "nef", "crw"].contains(&ext.as_str())
+            } else {
+                false
+            }
+        })
         .collect();
 
     if entries.is_empty() {
-        state.status = "No files found".to_string();
-        return;
+        return Err("No supported RAW files found (ARW, NEF, CRW)".to_string());
     }
 
     let total_files = entries.len() as f64;
     let processed_count = Arc::new(Mutex::new(0));
 
-    let pb = IndicatifProgressBar::new(total_files as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
-            .progress_chars("##-"),
-    );
-
+    // Process files in parallel
     entries.par_iter().for_each(|entry| {
         let path = entry.path();
-        let dest_file = dest_path.join(format!(
+        let output_file = dest_path.join(format!(
             "{}.jpg",
             path.file_stem().unwrap().to_str().unwrap()
         ));
 
-        let output = Command::new("dcraw")
-            .arg("-c")
-            .arg("-e")
-            .arg(path.to_str().unwrap())
-            .output();
-
-        if let Ok(output) = output {
-            if output.status.success() {
-                let jpeg_data = output.stdout;
-                if fs::write(&dest_file, jpeg_data).is_ok() {
-                    let mut count = processed_count.lock().unwrap();
-                    *count += 1;
-                    pb.inc(1);
-                    // Update progress for the GUI
-                    let progress = *count as f64 / total_files;
-                    let mut state_progress = state.progress; // Access outside closure
-                    state_progress = progress; // Update progress
-                    state.progress = progress; // Reflect in GUI
+        if let Ok(raw_image) = decode_file(&path) {
+            if let Ok(rgb_data) = raw_image.get_image() {
+                if let Some(img) = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(
+                    raw_image.width as u32,
+                    raw_image.height as u32,
+                    rgb_data,
+                ) {
+                    if img
+                        .save_with_format(&output_file, ImageFormat::Jpeg)
+                        .is_ok()
+                    {
+                        let mut count = processed_count.lock().unwrap();
+                        *count += 1;
+                        let progress = *count as f64 / total_files;
+                        state.progress = progress; // Update progress bar
+                    }
                 }
             }
         }
     });
 
-    pb.finish_with_message("Conversion complete");
-
     let final_count = *processed_count.lock().unwrap();
-    state.status = format!("Converted {} images", final_count);
-    state.progress = 1.0;
+    state.progress = 1.0; // Ensure progress bar completes
+    Ok(final_count)
 }
