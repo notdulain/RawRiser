@@ -1,5 +1,6 @@
 use druid::widget::{Button, Flex, Label, TextBox};
 use druid::{AppLauncher, Data, Env, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
+use image::{DynamicImage, ImageBuffer, Rgb, ImageOutputFormat};
 use rawloader::decode_file;
 use rayon::prelude::*;
 use std::fs;
@@ -118,14 +119,21 @@ fn convert_images(source: &str, dest: &str) -> Result<usize, String> {
     entries.par_iter().for_each(|entry| {
         let path = entry.path();
         if let Ok(raw_img) = decode_file(&path) {
-            if let Some(preview) = raw_img.previews.first() {
+            // Attempt to convert raw data to RGB ImageBuffer
+            if let Ok(img_buffer) = convert_raw_to_rgb(&raw_img) {
+                let dynamic_img = DynamicImage::ImageRgb8(img_buffer);
                 let dest_file = dest_path.join(format!(
                     "{}.jpg",
                     path.file_stem().unwrap().to_str().unwrap()
                 ));
-                if fs::write(&dest_file, &preview.data).is_ok() {
-                    let mut count = processed_count.lock().unwrap();
-                    *count += 1;
+                if let Ok(mut file) = fs::File::create(&dest_file) {
+                    if dynamic_img
+                        .write_to(&mut file, ImageOutputFormat::Jpeg(85))
+                        .is_ok()
+                    {
+                        let mut count = processed_count.lock().unwrap();
+                        *count += 1;
+                    }
                 }
             }
         }
@@ -133,4 +141,23 @@ fn convert_images(source: &str, dest: &str) -> Result<usize, String> {
 
     let final_count = *processed_count.lock().unwrap();
     Ok(final_count)
+}
+
+// Helper function to convert RawImage data to an RGB ImageBuffer
+fn convert_raw_to_rgb(raw_img: &rawloader::RawImage) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>, String> {
+    match &raw_img.data {
+        rawloader::RawImageData::Integer(data) => {
+            // Assume 16-bit data, scale to 8-bit RGB (simplified, no demosaicing)
+            let mut rgb_data = Vec::with_capacity(raw_img.width as usize * raw_img.height as usize * 3);
+            for pixel in data {
+                let value = (pixel / 256) as u8; // Scale 16-bit to 8-bit
+                rgb_data.push(value); // R
+                rgb_data.push(value); // G
+                rgb_data.push(value); // B
+            }
+            ImageBuffer::from_vec(raw_img.width as u32, raw_img.height as u32, rgb_data)
+                .ok_or("Failed to create RGB buffer".to_string())
+        }
+        rawloader::RawImageData::Float(_) => Err("Floating-point RAW data not supported".to_string()),
+    }
 }
