@@ -180,3 +180,5 @@ fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rg
         _ => None,
     }
 }
+
+//cannot decode photos
