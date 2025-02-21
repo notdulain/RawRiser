@@ -61,8 +61,11 @@ fn build_ui() -> impl Widget<AppState> {
             state.status = "Please select both folders".to_string();
             return;
         }
-        match convert_images(&state.source_folder, &state.dest_folder, state) {
-            Ok(count) => state.status = format!("Converted {} images", count),
+        match convert_images(&state.source_folder, &state.dest_folder) {
+            Ok((count, progress)) => {
+                state.status = format!("Converted {} images", count);
+                state.progress = progress;
+            }
             Err(msg) => state.status = msg,
         }
     });
@@ -97,16 +100,14 @@ fn build_ui() -> impl Widget<AppState> {
         .padding(20.0)
 }
 
-fn convert_images(source: &str, dest: &str, state: &mut AppState) -> Result<usize, String> {
+fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
 
-    // Validate directories
     if !source_path.is_dir() || !dest_path.is_dir() {
         return Err("Invalid folder path(s)".to_string());
     }
 
-    // Collect files, filtering for popular RAW formats
     let entries: Vec<_> = fs::read_dir(source_path)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
@@ -127,7 +128,6 @@ fn convert_images(source: &str, dest: &str, state: &mut AppState) -> Result<usiz
     let total_files = entries.len() as f64;
     let processed_count = Arc::new(Mutex::new(0));
 
-    // Process files in parallel
     entries.par_iter().for_each(|entry| {
         let path = entry.path();
         let output_file = dest_path.join(format!(
@@ -136,27 +136,32 @@ fn convert_images(source: &str, dest: &str, state: &mut AppState) -> Result<usiz
         ));
 
         if let Ok(raw_image) = decode_file(&path) {
-            if let Ok(rgb_data) = raw_image.get_image() {
-                if let Some(img) = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(
-                    raw_image.width as u32,
-                    raw_image.height as u32,
-                    rgb_data,
-                ) {
-                    if img
-                        .save_with_format(&output_file, ImageFormat::Jpeg)
-                        .is_ok()
-                    {
-                        let mut count = processed_count.lock().unwrap();
-                        *count += 1;
-                        let progress = *count as f64 / total_files;
-                        state.progress = progress; // Update progress bar
-                    }
+            if let Some(img) = raw_to_image_buffer(&raw_image) {
+                if img.save_with_format(&output_file, ImageFormat::Jpeg).is_ok() {
+                    let mut count = processed_count.lock().unwrap();
+                    *count += 1;
                 }
             }
         }
     });
 
     let final_count = *processed_count.lock().unwrap();
-    state.progress = 1.0; // Ensure progress bar completes
-    Ok(final_count)
+    let final_progress = if total_files > 0.0 { final_count as f64 / total_files } else { 1.0 };
+    Ok((final_count, final_progress))
+}
+
+fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    match &raw_image.data {
+        rawloader::RawImageData::Integer(data) => {
+            let mut rgb_data = Vec::with_capacity(raw_image.width as usize * raw_image.height as usize * 3);
+            for pixel in data {
+                let value = (*pixel as f32 / 65535.0 * 255.0) as u8; // Scale 16-bit to 8-bit
+                rgb_data.push(value); // R (simplified, no demosaicing)
+                rgb_data.push(value); // G
+                rgb_data.push(value); // B
+            }
+            ImageBuffer::from_raw(raw_image.width as u32, raw_image.height as u32, rgb_data)
+        }
+        rawloader::RawImageData::Float(_) => None, // Skip floating-point data for simplicity
+    }
 }
