@@ -1,10 +1,10 @@
-use druid::widget::{Button, Flex, Label, TextBox};
+use druid::widget::{Button, Flex, Label, TextBox, ProgressBar};
 use druid::{AppLauncher, Data, Env, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
-use image::{DynamicImage, ImageBuffer, Rgb, ImageOutputFormat};
-use rawloader::decode_file;
+use indicatif::{ProgressBar as IndicatifProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tinyfiledialogs::select_folder_dialog;
 
@@ -13,17 +13,19 @@ struct AppState {
     source_folder: String,
     dest_folder: String,
     status: String,
+    progress: f64, // 0.0 to 1.0
 }
 
 fn main() -> Result<(), PlatformError> {
     let main_window = WindowDesc::new(build_ui())
         .title("RawRiser")
-        .window_size((400.0, 200.0));
+        .window_size((400.0, 250.0));
 
     let initial_state = AppState {
         source_folder: String::new(),
         dest_folder: String::new(),
         status: "Ready".to_string(),
+        progress: 0.0,
     };
 
     AppLauncher::with_window(main_window)
@@ -59,13 +61,11 @@ fn build_ui() -> impl Widget<AppState> {
             state.status = "Please select both folders".to_string();
             return;
         }
-        match convert_images(&state.source_folder, &state.dest_folder) {
-            Ok(count) => state.status = format!("Converted {} images", count),
-            Err(msg) => state.status = msg,
-        }
+        convert_images(&state.source_folder, &state.dest_folder, state);
     });
 
     let status_label = Label::new(|data: &AppState, _env: &Env| data.status.clone());
+    let progress_bar = ProgressBar::new().lens(AppState::progress);
 
     Flex::column()
         .with_child(
@@ -89,75 +89,74 @@ fn build_ui() -> impl Widget<AppState> {
         .with_child(convert_button)
         .with_spacer(20.0)
         .with_child(status_label)
+        .with_spacer(10.0)
+        .with_child(progress_bar)
         .padding(20.0)
 }
 
-fn convert_images(source: &str, dest: &str) -> Result<usize, String> {
+fn convert_images(source: &str, dest: &str, state: &mut AppState) {
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
 
-    // Check if paths are valid directories
     if !source_path.is_dir() || !dest_path.is_dir() {
-        return Err("Invalid folder path(s)".to_string());
+        state.status = "Invalid folder path(s)".to_string();
+        return;
     }
 
-    // Collect all files in the source directory
     let entries: Vec<_> = fs::read_dir(source_path)
-        .map_err(|e| e.to_string())?
+        .unwrap()
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
         .collect();
 
     if entries.is_empty() {
-        return Err("No files found".to_string());
+        state.status = "No files found".to_string();
+        return;
     }
 
-    // Thread-safe counter for successful conversions
+    let total_files = entries.len() as f64;
     let processed_count = Arc::new(Mutex::new(0));
 
-    // Process files in parallel
+    let pb = IndicatifProgressBar::new(total_files as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .progress_chars("##-"),
+    );
+
     entries.par_iter().for_each(|entry| {
         let path = entry.path();
-        if let Ok(raw_img) = decode_file(&path) {
-            // Attempt to convert raw data to RGB ImageBuffer
-            if let Ok(img_buffer) = convert_raw_to_rgb(&raw_img) {
-                let dynamic_img = DynamicImage::ImageRgb8(img_buffer);
-                let dest_file = dest_path.join(format!(
-                    "{}.jpg",
-                    path.file_stem().unwrap().to_str().unwrap()
-                ));
-                if let Ok(mut file) = fs::File::create(&dest_file) {
-                    if dynamic_img
-                        .write_to(&mut file, ImageOutputFormat::Jpeg(85))
-                        .is_ok()
-                    {
-                        let mut count = processed_count.lock().unwrap();
-                        *count += 1;
-                    }
+        let dest_file = dest_path.join(format!(
+            "{}.jpg",
+            path.file_stem().unwrap().to_str().unwrap()
+        ));
+
+        let output = Command::new("dcraw")
+            .arg("-c")
+            .arg("-e")
+            .arg(path.to_str().unwrap())
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let jpeg_data = output.stdout;
+                if fs::write(&dest_file, jpeg_data).is_ok() {
+                    let mut count = processed_count.lock().unwrap();
+                    *count += 1;
+                    pb.inc(1);
+                    // Update progress for the GUI
+                    let progress = *count as f64 / total_files;
+                    let mut state_progress = state.progress; // Access outside closure
+                    state_progress = progress; // Update progress
+                    state.progress = progress; // Reflect in GUI
                 }
             }
         }
     });
 
-    let final_count = *processed_count.lock().unwrap();
-    Ok(final_count)
-}
+    pb.finish_with_message("Conversion complete");
 
-// Helper function to convert RawImage data to an RGB ImageBuffer
-fn convert_raw_to_rgb(raw_img: &rawloader::RawImage) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>, String> {
-    match &raw_img.data {
-        rawloader::RawImageData::Integer(data) => {
-            // Assume 16-bit data, scale to 8-bit RGB (simplified, no demosaicing)
-            let mut rgb_data = Vec::with_capacity(raw_img.width as usize * raw_img.height as usize * 3);
-            for pixel in data {
-                let value = (pixel / 256) as u8; // Scale 16-bit to 8-bit
-                rgb_data.push(value); // R
-                rgb_data.push(value); // G
-                rgb_data.push(value); // B
-            }
-            ImageBuffer::from_vec(raw_img.width as u32, raw_img.height as u32, rgb_data)
-                .ok_or("Failed to create RGB buffer".to_string())
-        }
-        rawloader::RawImageData::Float(_) => Err("Floating-point RAW data not supported".to_string()),
-    }
+    let final_count = *processed_count.lock().unwrap();
+    state.status = format!("Converted {} images", final_count);
+    state.progress = 1.0;
 }
