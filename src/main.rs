@@ -1,5 +1,5 @@
 use druid::widget::{Button, Flex, Label, ProgressBar, TextBox};
-use druid::{AppLauncher, Data, Env, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
+use druid::{AppLauncher, Data, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
 use image::{ImageBuffer, Rgb};
 use rawloader::decode_file;
 use rayon::prelude::*;
@@ -16,8 +16,9 @@ struct AppState {
     progress: f64,
 }
 
-fn main() -> Result<(), PlatformError> {
-    let main_window = WindowDesc::new(|| build_ui()) // Fixed: Added closure
+fn main() {
+    // Remove the Result return type and add explicit error handling
+    let main_window = WindowDesc::new(build_ui)
         .title("RawRiser")
         .window_size((400.0, 250.0));
 
@@ -28,9 +29,15 @@ fn main() -> Result<(), PlatformError> {
         progress: 0.0,
     };
 
-    AppLauncher::with_window(main_window)
-        .launch(initial_state)?;
-    Ok(())
+    let launcher = AppLauncher::with_window(main_window);
+
+    match launcher.launch(initial_state) {
+        Ok(_) => (),
+        Err(e) => {
+            eprintln!("Error launching application: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn build_ui() -> impl Widget<AppState> {
@@ -43,6 +50,7 @@ fn build_ui() -> impl Widget<AppState> {
         .on_click(|_ctx, data: &mut AppState, _env| {
             if let Some(folder) = select_folder_dialog("Select Source Folder", "") {
                 data.source_folder = folder;
+                data.status = "Source folder selected".to_string();
             }
         });
 
@@ -55,6 +63,7 @@ fn build_ui() -> impl Widget<AppState> {
         .on_click(|_ctx, data: &mut AppState, _env| {
             if let Some(folder) = select_folder_dialog("Select Destination Folder", "") {
                 data.dest_folder = folder;
+                data.status = "Destination folder selected".to_string();
             }
         });
 
@@ -67,18 +76,24 @@ fn build_ui() -> impl Widget<AppState> {
             data.status = "Converting...".to_string();
             data.progress = 0.0;
 
-            match convert_images(&data.source_folder, &data.dest_folder) {
-                Ok((count, final_progress)) => {
-                    data.status = format!("Converted {} images", count);
-                    data.progress = final_progress;
+            // Run conversion in a separate thread to avoid blocking the UI
+            let source = data.source_folder.clone();
+            let dest = data.dest_folder.clone();
+            
+            std::thread::spawn(move || {
+                match convert_images(&source, &dest) {
+                    Ok((count, final_progress)) => {
+                        data.status = format!("Converted {} images", count);
+                        data.progress = final_progress;
+                    }
+                    Err(msg) => {
+                        data.status = msg;
+                    }
                 }
-                Err(msg) => {
-                    data.status = msg;
-                }
-            }
+            });
         });
 
-    let status_label = Label::new(|data: &AppState, _env: &_| data.status.clone());
+    let status_label = Label::new(|data: &AppState, _: &_| data.status.clone());
     let progress_bar = ProgressBar::new()
         .lens(AppState::progress);
 
@@ -179,17 +194,12 @@ fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rg
                         continue;
                     }
                     
-                    // Convert 16-bit raw data to 8-bit RGB with basic processing
                     let max_value = raw_image.whitelevels[0] as f32;
                     let mut value = (data[idx] as f32 / max_value).min(1.0);
                     
-                    // Apply basic gamma correction
                     value = value.powf(1.0/2.2);
-                    
-                    // Convert to 8-bit
                     let pixel = (value * 255.0) as u8;
                     
-                    // Extend with RGB values (grayscale for now)
                     rgb_data.extend_from_slice(&[pixel, pixel, pixel]);
                 }
             }
