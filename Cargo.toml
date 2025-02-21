@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-druid = "0.8"          # For the simple GUI
+druid = "0.8"          # For the GUI
 tinyfiledialogs = "3.0" # For folder selection dialogs
-rawloader = "0.37"     # For decoding popular RAW formats (ARW, NEF, CRW, etc.)
+rawloader = "0.37"     # For decoding RAW formats
 image = "0.24"         # For saving as JPEG
 rayon = "1.5"          # For parallel processing

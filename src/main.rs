@@ -1,6 +1,6 @@
 use druid::widget::{Button, Flex, Label, ProgressBar, TextBox};
 use druid::{AppLauncher, Data, Env, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
-use image::{ImageBuffer, Rgb, ImageFormat};
+use image::{ImageBuffer, Rgb};
 use rawloader::decode_file;
 use rayon::prelude::*;
 use std::fs;
@@ -13,7 +13,7 @@ struct AppState {
     source_folder: String,
     dest_folder: String,
     status: String,
-    progress: f64, // 0.0 to 1.0 for the progress bar
+    progress: f64, // 0.0 to 1.0
 }
 
 fn main() -> Result<(), PlatformError> {
@@ -57,16 +57,24 @@ fn build_ui() -> impl Widget<AppState> {
     });
 
     let convert_button = Button::<AppState>::new("Convert").on_click(|_, state, _| {
+        println!("Convert button clicked!");
         if state.source_folder.is_empty() || state.dest_folder.is_empty() {
             state.status = "Please select both folders".to_string();
+            println!("Error: Missing source or destination folder");
             return;
         }
-        match convert_images(&state.source_folder, &state.dest_folder) {
-            Ok((count, progress)) => {
+        state.status = "Converting...".to_string();
+        state.progress = 0.0;
+        match convert_images(&state.source_folder, &state.dest_folder, state) {
+            Ok(count) => {
                 state.status = format!("Converted {} images", count);
-                state.progress = progress;
+                state.progress = 1.0;
+                println!("Conversion completed: {} images", count);
             }
-            Err(msg) => state.status = msg,
+            Err(msg) => {
+                state.status = msg.clone();
+                println!("Conversion failed: {}", msg);
+            }
         }
     });
 
@@ -100,7 +108,8 @@ fn build_ui() -> impl Widget<AppState> {
         .padding(20.0)
 }
 
-fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
+fn convert_images(source: &str, dest: &str, state: &mut AppState) -> Result<usize, String> {
+    println!("Starting conversion: source={}, dest={}", source, dest);
     let source_path = Path::new(source);
     let dest_path = Path::new(dest);
 
@@ -125,7 +134,7 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
         return Err("No supported RAW files found (ARW, NEF, CRW)".to_string());
     }
 
-    let total_files = entries.len() as f64;
+    let total_files = entries.len();
     let processed_count = Arc::new(Mutex::new(0));
 
     entries.par_iter().for_each(|entry| {
@@ -134,20 +143,29 @@ fn convert_images(source: &str, dest: &str) -> Result<(usize, f64), String> {
             "{}.jpg",
             path.file_stem().unwrap().to_str().unwrap()
         ));
+        println!("Processing file: {:?}", path);
 
         if let Ok(raw_image) = decode_file(&path) {
             if let Some(img) = raw_to_image_buffer(&raw_image) {
-                if img.save_with_format(&output_file, ImageFormat::Jpeg).is_ok() {
+                if img.save(&output_file).is_ok() {
                     let mut count = processed_count.lock().unwrap();
                     *count += 1;
+                    let progress = *count as f64 / total_files as f64;
+                    state.progress = progress; // Update progress
+                    println!("Converted: {:?}", output_file);
+                } else {
+                    println!("Failed to save: {:?}", output_file);
                 }
+            } else {
+                println!("Failed to decode RAW data: {:?}", path);
             }
+        } else {
+            println!("Failed to decode file: {:?}", path);
         }
     });
 
     let final_count = *processed_count.lock().unwrap();
-    let final_progress = if total_files > 0.0 { final_count as f64 / total_files } else { 1.0 };
-    Ok((final_count, final_progress))
+    Ok(final_count)
 }
 
 fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rgb<u8>, Vec<u8>>> {
@@ -155,13 +173,11 @@ fn raw_to_image_buffer(raw_image: &rawloader::RawImage) -> Option<ImageBuffer<Rg
         rawloader::RawImageData::Integer(data) => {
             let mut rgb_data = Vec::with_capacity(raw_image.width as usize * raw_image.height as usize * 3);
             for pixel in data {
-                let value = (*pixel as f32 / 65535.0 * 255.0) as u8; // Scale 16-bit to 8-bit
-                rgb_data.push(value); // R (simplified, no demosaicing)
-                rgb_data.push(value); // G
-                rgb_data.push(value); // B
+                let value = (*pixel as f32 / 65535.0 * 255.0) as u8; // Basic scaling
+                rgb_data.extend_from_slice(&[value, value, value]); // Simplified RGB
             }
             ImageBuffer::from_raw(raw_image.width as u32, raw_image.height as u32, rgb_data)
         }
-        rawloader::RawImageData::Float(_) => None, // Skip floating-point data for simplicity
+        _ => None,
     }
 }
