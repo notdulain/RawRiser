@@ -94,6 +94,6 @@ class RawConverter:
         self.root.after(0, lambda: self.progress.config(value=0))
 
 if __name__ == "__main__":
-    root = tk.Window()
+    root = tk.Tk()
     app = RawConverter(root)
     root.mainloop()
