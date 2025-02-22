@@ -1,5 +1,7 @@
 use druid::widget::{Button, Flex, Label, ProgressBar, TextBox};
-use druid::{AppLauncher, Data, Lens, PlatformError, Widget, WidgetExt, WindowDesc};
+use druid::{AppLauncher, Data, Lens, Widget, WidgetExt, WindowDesc};
+use druid::commands::QUIT_APP;
+use druid::{Command, Env, Selector, SingleUse, Target};
 use image::{ImageBuffer, Rgb};
 use rawloader::decode_file;
 use rayon::prelude::*;
@@ -7,6 +9,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tinyfiledialogs::select_folder_dialog;
+
+const UPDATE_STATUS: Selector<(String, f64)> = Selector::new("update_status");
 
 #[derive(Clone, Data, Lens)]
 struct AppState {
@@ -16,8 +20,16 @@ struct AppState {
     progress: f64,
 }
 
+impl AppState {
+    fn handle_command(&mut self, cmd: &Command) {
+        if let Some((status, progress)) = cmd.get(UPDATE_STATUS) {
+            self.status = status.clone();
+            self.progress = *progress;
+        }
+    }
+}
+
 fn main() {
-    // Remove the Result return type and add explicit error handling
     let main_window = WindowDesc::new(build_ui)
         .title("RawRiser")
         .window_size((400.0, 250.0));
@@ -29,14 +41,25 @@ fn main() {
         progress: 0.0,
     };
 
-    let launcher = AppLauncher::with_window(main_window);
+    AppLauncher::with_window(main_window)
+        .delegate(AppDelegate)
+        .launch(initial_state)
+        .expect("Failed to launch application");
+}
 
-    match launcher.launch(initial_state) {
-        Ok(_) => (),
-        Err(e) => {
-            eprintln!("Error launching application: {}", e);
-            std::process::exit(1);
-        }
+struct AppDelegate;
+
+impl druid::AppDelegate<AppState> for AppDelegate {
+    fn command(
+        &mut self,
+        _ctx: &mut druid::DelegateCtx,
+        _target: Target,
+        cmd: &Command,
+        data: &mut AppState,
+        _env: &Env,
+    ) -> bool {
+        data.handle_command(cmd);
+        false
     }
 }
 
@@ -68,7 +91,7 @@ fn build_ui() -> impl Widget<AppState> {
         });
 
     let convert_button = Button::new("Convert")
-        .on_click(|_ctx, data: &mut AppState, _env| {
+        .on_click(|ctx, data: &mut AppState, _env| {
             if data.source_folder.is_empty() || data.dest_folder.is_empty() {
                 data.status = "Please select both folders".to_string();
                 return;
@@ -76,18 +99,25 @@ fn build_ui() -> impl Widget<AppState> {
             data.status = "Converting...".to_string();
             data.progress = 0.0;
 
-            // Run conversion in a separate thread to avoid blocking the UI
             let source = data.source_folder.clone();
             let dest = data.dest_folder.clone();
+            let event_sink = ctx.get_external_handle();
             
             std::thread::spawn(move || {
                 match convert_images(&source, &dest) {
                     Ok((count, final_progress)) => {
-                        data.status = format!("Converted {} images", count);
-                        data.progress = final_progress;
+                        let _ = event_sink.submit_command(
+                            UPDATE_STATUS,
+                            (format!("Converted {} images", count), final_progress),
+                            Target::Auto,
+                        );
                     }
                     Err(msg) => {
-                        data.status = msg;
+                        let _ = event_sink.submit_command(
+                            UPDATE_STATUS,
+                            (msg, 0.0),
+                            Target::Auto,
+                        );
                     }
                 }
             });
