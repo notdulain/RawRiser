@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 
 class RawConverter:
+    # Da GUI
     def __init__(self, root):
         self.root = root
         self.root.title("RAW to JPEG Converter")
@@ -40,23 +41,27 @@ class RawConverter:
         self.status_label = tk.Label(root, text="Ready")
         self.status_label.pack(pady=5)
 
+    # Source folder browseing window
     def browse_source(self):
         folder = filedialog.askdirectory()
         if folder:
             self.source_entry.delete(0, tk.END)
             self.source_entry.insert(0, folder)
 
+    # Source folder browseing window
     def browse_dest(self):
         folder = filedialog.askdirectory()
         if folder:
             self.dest_entry.delete(0, tk.END)
             self.dest_entry.insert(0, folder)
 
+    # Convert a single RAW file to JPEG
     def convert_raw_to_jpeg(self, raw_path, jpeg_path):
         with rawpy.imread(raw_path) as raw:
             rgb = raw.postprocess(use_camera_wb=True)
             imageio.imsave(jpeg_path, rgb)
 
+    # Validate inputs and start conversion process in a separate thread
     def start_conversion(self):
         source = self.source_entry.get()
         dest = self.dest_entry.get()
@@ -64,12 +69,14 @@ class RawConverter:
         if not source or not dest:
             self.status_label.config(text="Please select both folders")
             return
-            
+
+        # Disable convert button and start processing in background    
         self.convert_btn.config(state='disabled')
         threading.Thread(target=self.convert_files, args=(source, dest)).start()
 
+    # Process all RAW files in the source directory
     def convert_files(self, source, dest):
-        raw_extensions = ('.arw', '.nef', '.cr2', '.crw', '.orf', '.rw2')
+        raw_extensions = ('.arw', '.nef', '.cr2', '.crw', '.orf', '.rw2') # Supported RAW files list
         files = [f for f in Path(source).glob('*') if f.suffix.lower() in raw_extensions]
         total_files = len(files)
         
@@ -78,6 +85,7 @@ class RawConverter:
             self.root.after(0, lambda: self.convert_btn.config(state='normal'))
             return
             
+        # Process each file and update progress
         for i, file in enumerate(files, 1):
             try:
                 output_path = Path(dest) / f"{file.stem}.jpg"
@@ -89,6 +97,7 @@ class RawConverter:
             except Exception as e:
                 print(f"Error converting {file}: {e}")
         
+        # Reset UI
         self.root.after(0, lambda: self.status_label.config(text="Conversion complete!"))
         self.root.after(0, lambda: self.convert_btn.config(state='normal'))
         self.root.after(0, lambda: self.progress.config(value=0))
